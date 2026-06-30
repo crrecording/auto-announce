@@ -57,6 +57,8 @@ class ReceiverStats:
     playback_underflows: int = 0
     playback_drops: int = 0
     playback_buffer_frames: int = 0
+    playback_broken_pipes: int = 0
+    playback_exit_code: int | None = None
     last_from: str | None = None
     started_at: float = time.time()
 
@@ -100,21 +102,29 @@ class WavWriter:
 
 
 class RawAudioPlayer:
-    def __init__(self, command: list[str]):
+    def __init__(self, command: list[str], stats: ReceiverStats):
         self.command = command
+        self.stats = stats
         self.process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
         )
 
-    def write(self, pcm: bytes) -> None:
+    def write(self, pcm: bytes) -> bool:
+        exit_code = self.process.poll()
+        if exit_code is not None:
+            self.stats.playback_exit_code = exit_code
+            return False
         if self.process.stdin is None:
-            return
+            return False
         try:
             self.process.stdin.write(pcm)
             self.process.stdin.flush()
+            return True
         except BrokenPipeError:
-            pass
+            self.stats.playback_broken_pipes += 1
+            self.stats.playback_exit_code = self.process.poll()
+            return False
 
     def close(self) -> None:
         if self.process.stdin:
@@ -130,8 +140,8 @@ class RawAudioPlayer:
 
 class BufferedAudioPlayer:
     def __init__(self, command: list[str], buffer_ms: int, max_buffer_ms: int, stats: ReceiverStats):
-        self.player = RawAudioPlayer(command)
         self.stats = stats
+        self.player = RawAudioPlayer(command, stats)
         self.buffer = deque()
         self.condition = threading.Condition()
         self.closed = False
@@ -176,7 +186,12 @@ class BufferedAudioPlayer:
                     self.stats.playback_underflows += 1
                 self.stats.playback_buffer_frames = len(self.buffer)
 
-            self.player.write(frame)
+            if not self.player.write(frame):
+                with self.condition:
+                    self.closed = True
+                    self.buffer.clear()
+                    self.stats.playback_buffer_frames = 0
+                return
             next_write_at += FRAME_INTERVAL_S
             sleep_s = next_write_at - time.perf_counter()
             if sleep_s > 0:
@@ -247,6 +262,7 @@ def estimate_loss_ppm(stats: ReceiverStats) -> int:
 def print_stats(stats: ReceiverStats) -> None:
     elapsed = max(time.time() - stats.started_at, 0.001)
     pps = stats.packets / elapsed
+    playback_state = "dead" if stats.playback_exit_code is not None else "alive"
     print(
         f"packets={stats.packets} pps={pps:.1f} "
         f"seq={stats.first_seq}..{stats.last_seq} "
@@ -254,6 +270,7 @@ def print_stats(stats: ReceiverStats) -> None:
         f"lost={stats.lost} late={stats.duplicate_or_late} "
         f"playbuf={stats.playback_buffer_frames} "
         f"under={stats.playback_underflows} drop={stats.playback_drops} "
+        f"pipe={stats.playback_broken_pipes} play={playback_state}:{stats.playback_exit_code if stats.playback_exit_code is not None else '-'} "
         f"errors={stats.parse_errors} from={stats.last_from or '-'}",
         flush=True,
     )

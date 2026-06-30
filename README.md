@@ -105,6 +105,8 @@ Live playback starts with a small jitter buffer before writing to the local play
 playbuf = queued playback frames
 under = playback underflows
 drop = old frames dropped because the local playback buffer got too large
+pipe = broken local-player pipe writes
+play = local player process state and exit code
 ```
 
 If the host computer is under heavy load, such as compiling Homebrew packages, `under` may increase even when UDP packet loss is zero.
@@ -112,7 +114,7 @@ If the host computer is under heavy load, such as compiling Homebrew packages, `
 If the receiver has another raw-audio playback command, pass it explicitly. The command receives 48 kHz mono PCM16_LE on stdin:
 
 ```bash
-python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --play --play-command "ffplay -hide_banner -loglevel error -f s16le -ar 48000 -ch_layout mono -nodisp -autoexit -i -"
+python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --play --play-command "ffplay -hide_banner -loglevel error -f s16le -ar 48000 -ch_layout mono -nodisp -i -"
 ```
 
 ## Protocol checks
