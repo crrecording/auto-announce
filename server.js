@@ -6,6 +6,7 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
+const { performance } = require("node:perf_hooks");
 const { URL } = require("node:url");
 
 const {
@@ -72,6 +73,7 @@ let telemetrySocket = null;
 let captureProcess = null;
 let captureBuffer = Buffer.alloc(0);
 let audioDeviceScanId = 0;
+let nextGeneratedFrameAt = 0;
 
 function json(res, status, body) {
   const data = Buffer.from(JSON.stringify(body, null, 2));
@@ -402,8 +404,7 @@ function startStream(config = {}) {
 
   senderSocket = dgram.createSocket("udp4");
   if (device.kind === "generated") {
-    senderTimer = setInterval(sendFrame, FRAME_INTERVAL_MS);
-    sendFrame();
+    startGeneratedSender();
   } else {
     startCapture(device);
   }
@@ -411,8 +412,9 @@ function startStream(config = {}) {
 }
 
 function stopStream() {
-  if (senderTimer) clearInterval(senderTimer);
+  if (senderTimer) clearTimeout(senderTimer);
   senderTimer = null;
+  nextGeneratedFrameAt = 0;
   stopCapture();
   if (senderSocket) senderSocket.close();
   senderSocket = null;
@@ -420,7 +422,31 @@ function stopStream() {
   broadcast();
 }
 
-function sendFrame() {
+function startGeneratedSender() {
+  nextGeneratedFrameAt = performance.now();
+  runGeneratedSender();
+}
+
+function runGeneratedSender() {
+  if (!senderSocket || !state.stream.running || state.stream.sourceId !== "test-tone") return;
+
+  const now = performance.now();
+  let framesDue = 0;
+  while (nextGeneratedFrameAt <= now && framesDue < 5) {
+    sendGeneratedFrame();
+    nextGeneratedFrameAt += FRAME_INTERVAL_MS;
+    framesDue += 1;
+  }
+
+  if (framesDue === 5 && nextGeneratedFrameAt < now - FRAME_INTERVAL_MS) {
+    nextGeneratedFrameAt = now + FRAME_INTERVAL_MS;
+  }
+
+  const delayMs = Math.max(0, nextGeneratedFrameAt - performance.now());
+  senderTimer = setTimeout(runGeneratedSender, delayMs);
+}
+
+function sendGeneratedFrame() {
   if (!senderSocket || !state.stream.running) return;
 
   const frameIndex = state.stream.seq;
