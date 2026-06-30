@@ -69,6 +69,24 @@ python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --wav-out rec
 
 Stop the receiver with `Ctrl+C`, then open `received.wav` to confirm the transmitted tone/audio.
 
+Python fallback with live playback:
+
+```bash
+python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --play
+```
+
+Live playback uses `ffplay` from FFmpeg or `play` from SoX if either is installed on the receiver computer. You can also record and play at the same time:
+
+```bash
+python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --play --wav-out received.wav
+```
+
+If the receiver has another raw-audio playback command, pass it explicitly. The command receives 48 kHz mono PCM16_LE on stdin:
+
+```bash
+python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --play --play-command "ffplay -hide_banner -loglevel error -f s16le -ar 48000 -ac 1 -nodisp -autoexit -"
+```
+
 ## Protocol checks
 
 ```bash

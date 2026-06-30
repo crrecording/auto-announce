@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import argparse
 import math
+import shlex
+import shutil
 import socket
 import struct
+import subprocess
 import time
 from dataclasses import dataclass
 
@@ -88,6 +91,75 @@ class WavWriter:
         self.file.close()
 
 
+class RawAudioPlayer:
+    def __init__(self, command: list[str]):
+        self.command = command
+        self.process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+        )
+
+    def write(self, pcm: bytes) -> None:
+        if self.process.stdin is None:
+            return
+        try:
+            self.process.stdin.write(pcm)
+            self.process.stdin.flush()
+        except BrokenPipeError:
+            pass
+
+    def close(self) -> None:
+        if self.process.stdin:
+            try:
+                self.process.stdin.close()
+            except BrokenPipeError:
+                pass
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+
+
+def default_playback_command() -> list[str] | None:
+    ffplay = shutil.which("ffplay")
+    if ffplay:
+        return [
+            ffplay,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            str(SAMPLE_RATE_HZ),
+            "-ac",
+            str(CHANNELS),
+            "-nodisp",
+            "-autoexit",
+            "-",
+        ]
+
+    play = shutil.which("play")
+    if play:
+        return [
+            play,
+            "-q",
+            "-t",
+            "raw",
+            "-r",
+            str(SAMPLE_RATE_HZ),
+            "-e",
+            "signed-integer",
+            "-b",
+            str(BITS_PER_SAMPLE),
+            "-c",
+            str(CHANNELS),
+            "-",
+        ]
+
+    return None
+
+
 def estimate_rms(audio: bytes) -> int:
     sample_count = len(audio) // 2
     if sample_count <= 0:
@@ -122,6 +194,20 @@ def print_stats(stats: ReceiverStats) -> None:
 def run(args: argparse.Namespace) -> int:
     stats = ReceiverStats()
     wav = WavWriter(args.wav_out) if args.wav_out else None
+    player = None
+    if args.play:
+        playback_command = shlex.split(args.play_command) if args.play_command else default_playback_command()
+        if playback_command is None:
+            print(
+                "Live playback requested, but no raw-audio player was found. "
+                "Install ffmpeg for ffplay, install SoX for play, or pass --play-command.",
+                flush=True,
+            )
+            if wav:
+                wav.close()
+            return 2
+        player = RawAudioPlayer(playback_command)
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((args.host, args.port))
     sock.settimeout(0.1)
@@ -130,6 +216,8 @@ def run(args: argparse.Namespace) -> int:
     print(f"Telemetry target: {args.telemetry_host or 'audio sender address'}:{args.telemetry_port}")
     if wav:
         print(f"Writing received PCM to WAV: {args.wav_out}")
+    if player:
+        print(f"Live playback command: {' '.join(playback_command)}")
 
     next_print = time.time() + 1
     try:
@@ -169,6 +257,8 @@ def run(args: argparse.Namespace) -> int:
                 stats.last_from = f"{remote[0]}:{remote[1]}"
                 if wav:
                     wav.write(payload.audio)
+                if player:
+                    player.write(payload.audio)
 
                 telemetry = TelemetryPayload(
                     status=STATUS_STREAM_PRESENT,
@@ -203,6 +293,8 @@ def run(args: argparse.Namespace) -> int:
         return 0
     finally:
         sock.close()
+        if player:
+            player.close()
         if wav:
             wav.close()
             print(f"WAV saved: {args.wav_out}")
@@ -215,6 +307,12 @@ def main() -> int:
     parser.add_argument("--telemetry-host", default=None, help="Host app IP for telemetry return packets.")
     parser.add_argument("--telemetry-port", type=int, default=DEFAULT_TELEMETRY_PORT, help="UDP telemetry destination port.")
     parser.add_argument("--wav-out", default=None, help="Optional path to write received PCM audio as a WAV file.")
+    parser.add_argument("--play", action="store_true", help="Play received PCM audio live through a local raw-audio player.")
+    parser.add_argument(
+        "--play-command",
+        default=None,
+        help="Optional raw-audio playback command. Receives 48 kHz mono PCM16_LE on stdin.",
+    )
     return run(parser.parse_args())
 
 
