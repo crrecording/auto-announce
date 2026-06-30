@@ -17,7 +17,9 @@ import shutil
 import socket
 import struct
 import subprocess
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 
 from protocol_codec import (
@@ -33,8 +35,11 @@ from protocol_codec import (
 DEFAULT_AUDIO_PORT = 41771
 DEFAULT_TELEMETRY_PORT = 41772
 SAMPLE_RATE_HZ = 48000
+FRAME_SAMPLES = 480
+FRAME_INTERVAL_S = FRAME_SAMPLES / SAMPLE_RATE_HZ
 CHANNELS = 1
 BITS_PER_SAMPLE = 16
+FRAME_BYTES = FRAME_SAMPLES * CHANNELS * BITS_PER_SAMPLE // 8
 
 
 @dataclass
@@ -49,6 +54,9 @@ class ReceiverStats:
     lost: int = 0
     duplicate_or_late: int = 0
     parse_errors: int = 0
+    playback_underflows: int = 0
+    playback_drops: int = 0
+    playback_buffer_frames: int = 0
     last_from: str | None = None
     started_at: float = time.time()
 
@@ -120,6 +128,63 @@ class RawAudioPlayer:
             self.process.terminate()
 
 
+class BufferedAudioPlayer:
+    def __init__(self, command: list[str], buffer_ms: int, max_buffer_ms: int, stats: ReceiverStats):
+        self.player = RawAudioPlayer(command)
+        self.stats = stats
+        self.buffer = deque()
+        self.condition = threading.Condition()
+        self.closed = False
+        self.started = False
+        self.start_frames = max(1, round(buffer_ms / (FRAME_INTERVAL_S * 1000)))
+        self.max_frames = max(self.start_frames, round(max_buffer_ms / (FRAME_INTERVAL_S * 1000)))
+        self.silence = b"\x00" * FRAME_BYTES
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def write(self, pcm: bytes) -> None:
+        if len(pcm) != FRAME_BYTES:
+            return
+        with self.condition:
+            while len(self.buffer) >= self.max_frames:
+                self.buffer.popleft()
+                self.stats.playback_drops += 1
+            self.buffer.append(bytes(pcm))
+            self.stats.playback_buffer_frames = len(self.buffer)
+            self.condition.notify()
+
+    def close(self) -> None:
+        with self.condition:
+            self.closed = True
+            self.condition.notify_all()
+        self.thread.join(timeout=2)
+        self.player.close()
+
+    def _run(self) -> None:
+        next_write_at = time.perf_counter()
+        while True:
+            with self.condition:
+                while not self.closed and not self.started and len(self.buffer) < self.start_frames:
+                    self.condition.wait(timeout=0.1)
+                if self.closed and not self.buffer:
+                    return
+                self.started = True
+                if self.buffer:
+                    frame = self.buffer.popleft()
+                else:
+                    frame = self.silence
+                    self.stats.playback_underflows += 1
+                self.stats.playback_buffer_frames = len(self.buffer)
+
+            self.player.write(frame)
+            next_write_at += FRAME_INTERVAL_S
+            sleep_s = next_write_at - time.perf_counter()
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            elif sleep_s < -0.1:
+                next_write_at = time.perf_counter()
+
+
 def default_playback_command() -> list[str] | None:
     ffplay = shutil.which("ffplay")
     if ffplay:
@@ -187,6 +252,8 @@ def print_stats(stats: ReceiverStats) -> None:
         f"seq={stats.first_seq}..{stats.last_seq} "
         f"ts={stats.first_timestamp}..{stats.last_timestamp} "
         f"lost={stats.lost} late={stats.duplicate_or_late} "
+        f"playbuf={stats.playback_buffer_frames} "
+        f"under={stats.playback_underflows} drop={stats.playback_drops} "
         f"errors={stats.parse_errors} from={stats.last_from or '-'}",
         flush=True,
     )
@@ -207,7 +274,7 @@ def run(args: argparse.Namespace) -> int:
             if wav:
                 wav.close()
             return 2
-        player = RawAudioPlayer(playback_command)
+        player = BufferedAudioPlayer(playback_command, args.play_buffer_ms, args.play_max_buffer_ms, stats)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((args.host, args.port))
@@ -219,6 +286,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"Writing received PCM to WAV: {args.wav_out}")
     if player:
         print(f"Live playback command: {' '.join(playback_command)}")
+        print(f"Live playback buffer: start={args.play_buffer_ms}ms max={args.play_max_buffer_ms}ms")
 
     next_print = time.time() + 1
     try:
@@ -309,6 +377,8 @@ def main() -> int:
     parser.add_argument("--telemetry-port", type=int, default=DEFAULT_TELEMETRY_PORT, help="UDP telemetry destination port.")
     parser.add_argument("--wav-out", default=None, help="Optional path to write received PCM audio as a WAV file.")
     parser.add_argument("--play", action="store_true", help="Play received PCM audio live through a local raw-audio player.")
+    parser.add_argument("--play-buffer-ms", type=int, default=750, help="Initial live playback buffer in milliseconds.")
+    parser.add_argument("--play-max-buffer-ms", type=int, default=2000, help="Maximum live playback buffer before old frames are dropped.")
     parser.add_argument(
         "--play-command",
         default=None,

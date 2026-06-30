@@ -99,6 +99,16 @@ Live playback uses `ffplay` from FFmpeg or `play` from SoX if either is installe
 python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --play --wav-out received.wav
 ```
 
+Live playback starts with a small jitter buffer before writing to the local player. The receiver stats include:
+
+```text
+playbuf = queued playback frames
+under = playback underflows
+drop = old frames dropped because the local playback buffer got too large
+```
+
+If the host computer is under heavy load, such as compiling Homebrew packages, `under` may increase even when UDP packet loss is zero.
+
 If the receiver has another raw-audio playback command, pass it explicitly. The command receives 48 kHz mono PCM16_LE on stdin:
 
 ```bash
