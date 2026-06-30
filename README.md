@@ -49,6 +49,26 @@ If telemetry needs an explicit return host:
 npm run receiver -- --host 0.0.0.0 --telemetry-host HOST_APP_IP
 ```
 
+Python fallback, if Node/npm is not installed:
+
+```bash
+python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP
+```
+
+Record received network audio to a WAV file:
+
+```bash
+npm run receiver -- --host 0.0.0.0 --telemetry-host HOST_APP_IP --wav-out received.wav
+```
+
+Python fallback with WAV recording:
+
+```bash
+python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --wav-out received.wav
+```
+
+Stop the receiver with `Ctrl+C`, then open `received.wav` to confirm the transmitted tone/audio.
+
 ## Protocol checks
 
 ```bash

@@ -2,6 +2,7 @@
 "use strict";
 
 const dgram = require("node:dgram");
+const fs = require("node:fs");
 
 const {
   MSG_AUDIO,
@@ -16,6 +17,7 @@ const listenHost = args.host || "0.0.0.0";
 const listenPort = Number(args.port || 41771);
 const telemetryPort = Number(args.telemetryPort || 41772);
 const configuredTelemetryHost = args.telemetryHost || null;
+const wavWriter = args.wavOut ? createWavWriter(args.wavOut) : null;
 
 const stats = {
   packets: 0,
@@ -64,6 +66,7 @@ socket.on("message", (raw, rinfo) => {
     stats.lastSeq = header.seq;
     stats.lastTimestamp = header.timestamp;
     stats.lastFrom = `${rinfo.address}:${rinfo.port}`;
+    if (wavWriter) wavWriter.write(payload.audio);
 
     const telemetry = {
       status: STATUS_STREAM_PRESENT,
@@ -99,6 +102,7 @@ socket.on("message", (raw, rinfo) => {
 socket.bind(listenPort, listenHost, () => {
   console.log(`Auto-Announce receiver simulator listening on udp://${listenHost}:${listenPort}`);
   console.log(`Telemetry target: ${configuredTelemetryHost || "audio sender address"}:${telemetryPort}`);
+  if (wavWriter) console.log(`Writing received PCM to WAV: ${args.wavOut}`);
 });
 
 setInterval(printStats, 1000);
@@ -138,15 +142,54 @@ function parseArgs(argv) {
     else if (arg === "--port") out.port = argv[++i];
     else if (arg === "--telemetry-host") out.telemetryHost = argv[++i];
     else if (arg === "--telemetry-port") out.telemetryPort = argv[++i];
+    else if (arg === "--wav-out") out.wavOut = argv[++i];
     else if (arg === "--help") {
-      console.log("Usage: node receiver.js [--host 0.0.0.0] [--port 41771] [--telemetry-host HOST] [--telemetry-port 41772]");
+      console.log("Usage: node receiver.js [--host 0.0.0.0] [--port 41771] [--telemetry-host HOST] [--telemetry-port 41772] [--wav-out received.wav]");
       process.exit(0);
     }
   }
   return out;
 }
 
+function createWavWriter(file) {
+  const fd = fs.openSync(file, "w");
+  let bytesWritten = 0;
+  fs.writeSync(fd, Buffer.alloc(44));
+
+  return {
+    write(audio) {
+      fs.writeSync(fd, audio);
+      bytesWritten += audio.length;
+    },
+    close() {
+      const sampleRate = 48000;
+      const channels = 1;
+      const bitsPerSample = 16;
+      const byteRate = sampleRate * channels * bitsPerSample / 8;
+      const blockAlign = channels * bitsPerSample / 8;
+      const header = Buffer.alloc(44);
+      header.write("RIFF", 0);
+      header.writeUInt32LE(36 + bytesWritten, 4);
+      header.write("WAVE", 8);
+      header.write("fmt ", 12);
+      header.writeUInt32LE(16, 16);
+      header.writeUInt16LE(1, 20);
+      header.writeUInt16LE(channels, 22);
+      header.writeUInt32LE(sampleRate, 24);
+      header.writeUInt32LE(byteRate, 28);
+      header.writeUInt16LE(blockAlign, 32);
+      header.writeUInt16LE(bitsPerSample, 34);
+      header.write("data", 36);
+      header.writeUInt32LE(bytesWritten, 40);
+      fs.writeSync(fd, header, 0, 44, 0);
+      fs.closeSync(fd);
+      console.log(`WAV saved: ${file}`);
+    }
+  };
+}
+
 process.on("SIGINT", () => {
   printStats();
+  if (wavWriter) wavWriter.close();
   socket.close(() => process.exit(0));
 });
