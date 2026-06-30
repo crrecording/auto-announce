@@ -6,6 +6,9 @@ const runState = document.querySelector("#runState");
 const streamStats = document.querySelector("#streamStats");
 const telemetryStats = document.querySelector("#telemetryStats");
 const devicesEl = document.querySelector("#devices");
+const refreshDevicesBtn = document.querySelector("#refreshDevicesBtn");
+const deviceScanState = document.querySelector("#deviceScanState");
+const sourceSelect = document.querySelector("#sourceId");
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -20,6 +23,10 @@ form.addEventListener("submit", async (event) => {
 
 stopBtn.addEventListener("click", async () => {
   await postJson("/api/stream/stop", {});
+});
+
+refreshDevicesBtn.addEventListener("click", async () => {
+  await postJson("/api/audio-devices/refresh", {});
 });
 
 async function postJson(url, body) {
@@ -42,9 +49,11 @@ function render(state) {
   document.querySelector("#streamId").value = state.stream.streamId;
   document.querySelector("#frequencyHz").value = state.stream.frequencyHz;
   document.querySelector("#gain").value = state.stream.gain;
+  renderSourceOptions(state.audioDevices, state.stream.sourceId);
 
   setDl(streamStats, {
     Target: `${state.stream.targetHost}:${state.stream.targetPort}`,
+    Source: state.stream.sourceName || state.stream.sourceId,
     Zone: state.stream.zoneId,
     Stream: state.stream.streamId,
     Sequence: state.stream.seq,
@@ -66,19 +75,47 @@ function render(state) {
     Errors: state.telemetry.errors,
   });
 
+  deviceScanState.textContent = scanText(state.audioDeviceScan);
   devicesEl.innerHTML = "";
   for (const device of state.audioDevices) {
     const row = document.createElement("div");
-    row.className = "device";
+    row.className = `device${device.id === state.stream.sourceId ? " selected" : ""}`;
     row.innerHTML = `
       <div>
         <strong>${escapeHtml(device.name)}</strong>
         <div class="muted">${escapeHtml(device.note || device.kind)}</div>
       </div>
-      <span class="muted">${device.ready ? "Ready" : "Unavailable"}</span>
+      <span class="muted">${escapeHtml(deviceLabel(device))}</span>
     `;
     devicesEl.append(row);
   }
+}
+
+function renderSourceOptions(devices, selectedId) {
+  const currentValue = sourceSelect.value || selectedId;
+  sourceSelect.innerHTML = "";
+  for (const device of devices) {
+    const option = document.createElement("option");
+    option.value = device.id;
+    option.textContent = device.name;
+    option.disabled = !device.ready;
+    sourceSelect.append(option);
+  }
+  sourceSelect.value = devices.some((device) => device.id === currentValue) ? currentValue : selectedId;
+}
+
+function deviceLabel(device) {
+  if (!device.ready) return "Unavailable";
+  if (device.kind === "generated") return "Generated";
+  return device.backend || device.kind;
+}
+
+function scanText(scan) {
+  if (!scan) return "";
+  const suffix = scan.scannedAt ? ` Last scan: ${scan.scannedAt}` : "";
+  if (scan.status === "scanning") return "Scanning audio devices...";
+  if (scan.error) return `${scan.error}${suffix}`;
+  return scan.status ? `Status: ${scan.status}.${suffix}` : "";
 }
 
 function setDl(dl, rows) {

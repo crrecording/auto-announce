@@ -19,6 +19,12 @@
     <section class="panel controls">
       <form id="streamForm">
         <label>
+          Audio Source
+          <select id="sourceId" name="sourceId">
+            <option value="test-tone">Test tone generator</option>
+          </select>
+        </label>
+        <label>
           Receiver IP
           <input id="targetHost" name="targetHost" value="127.0.0.1" autocomplete="off">
         </label>
@@ -61,7 +67,11 @@
     </section>
 
     <section class="panel">
-      <h2>Audio Source</h2>
+      <div class="section-head">
+        <h2>Audio Sources</h2>
+        <button type="button" id="refreshDevicesBtn">Refresh</button>
+      </div>
+      <p id="deviceScanState" class="muted"></p>
       <div id="devices" class="devices"></div>
     </section>
   </main>

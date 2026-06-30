@@ -81,7 +81,8 @@ label {
   font-weight: 650;
 }
 
-input {
+input,
+select {
   width: 100%;
   min-height: 38px;
   border: 1px solid var(--line);
@@ -170,12 +171,28 @@ dd {
   gap: 8px;
 }
 
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.section-head h2 {
+  margin-bottom: 0;
+}
+
 .device {
   display: flex;
   justify-content: space-between;
   gap: 12px;
   border-top: 1px solid var(--line);
   padding-top: 10px;
+}
+
+.device.selected {
+  color: var(--accent-dark);
 }
 
 .device:first-child {

@@ -27,6 +27,24 @@ By default the browser UI and telemetry listener bind to localhost. To expose th
 AUTO_ANNOUNCE_HOST=0.0.0.0 AUTO_ANNOUNCE_TELEMETRY_HOST=0.0.0.0 npm start
 ```
 
+## Host audio sources
+
+The host app can send either the built-in test tone or a selected macOS audio input device. Device capture uses FFmpeg's `avfoundation` input and converts the selected source to the Auto-Announce v1 transport format:
+
+```text
+48 kHz mono PCM16_LE
+```
+
+Install FFmpeg on the host computer to enable device listing and capture:
+
+```bash
+brew install ffmpeg
+```
+
+Then open the browser UI, click `Refresh` in Audio Sources, choose the input device, and start UDP audio.
+
+For system/app audio loopback, install or use a virtual audio input such as BlackHole, Loopback, Dante Virtual Soundcard, or another CoreAudio loopback device. Once macOS exposes it as an input, it should appear in the source list. macOS may ask for microphone/input permission for Terminal, VS Code, or the app that launched the server.
+
 ## Run the receiver simulator
 
 Local machine:
