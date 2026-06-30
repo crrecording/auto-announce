@@ -66,3 +66,23 @@ Recommended: `frame_samples=480` (10 ms @ 48k), `audio_bytes=960`.
 
 ## CRC
 - `crc16` optional in v1. If enabled, compute over payload bytes only and validate on receive.
+
+## Loopback proof
+
+Run a local host app -> simulated receiver -> host telemetry test:
+
+```bash
+python3 host_loopback.py
+```
+
+Expected result:
+
+```text
+result:                    PASS
+```
+
+Fast burst test:
+
+```bash
+python3 host_loopback.py --fast --frames 500
+```
