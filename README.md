@@ -111,6 +111,12 @@ play = local player process state and exit code
 
 If the host computer is under heavy load, such as compiling Homebrew packages, `under` may increase even when UDP packet loss is zero.
 
+For FFplay on current Homebrew FFmpeg builds, this explicit command is a good macOS fallback:
+
+```bash
+python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --play --wav-out received.wav --play-command "/usr/local/Cellar/ffmpeg/8.1.2/bin/ffplay -hide_banner -loglevel error -f s16le -ar 48000 -ch_layout mono -nodisp -i -"
+```
+
 If the receiver has another raw-audio playback command, pass it explicitly. The command receives 48 kHz mono PCM16_LE on stdin:
 
 ```bash

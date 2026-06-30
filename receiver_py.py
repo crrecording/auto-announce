@@ -171,14 +171,16 @@ class BufferedAudioPlayer:
         self.player.close()
 
     def _run(self) -> None:
-        next_write_at = time.perf_counter()
+        next_write_at = 0.0
         while True:
             with self.condition:
                 while not self.closed and not self.started and len(self.buffer) < self.start_frames:
                     self.condition.wait(timeout=0.1)
                 if self.closed and not self.buffer:
                     return
-                self.started = True
+                if not self.started:
+                    self.started = True
+                    next_write_at = time.perf_counter()
                 if self.buffer:
                     frame = self.buffer.popleft()
                 else:
