@@ -132,10 +132,11 @@ def default_playback_command() -> list[str] | None:
             "s16le",
             "-ar",
             str(SAMPLE_RATE_HZ),
-            "-ac",
-            str(CHANNELS),
+            "-ch_layout",
+            "mono",
             "-nodisp",
             "-autoexit",
+            "-i",
             "-",
         ]
 

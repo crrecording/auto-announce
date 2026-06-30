@@ -102,7 +102,7 @@ python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --play --wav-
 If the receiver has another raw-audio playback command, pass it explicitly. The command receives 48 kHz mono PCM16_LE on stdin:
 
 ```bash
-python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --play --play-command "ffplay -hide_banner -loglevel error -f s16le -ar 48000 -ac 1 -nodisp -autoexit -"
+python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --play --play-command "ffplay -hide_banner -loglevel error -f s16le -ar 48000 -ch_layout mono -nodisp -autoexit -i -"
 ```
 
 ## Protocol checks
