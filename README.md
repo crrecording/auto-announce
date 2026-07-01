@@ -61,6 +61,8 @@ npm run receiver -- --host 0.0.0.0
 
 Then set the host app receiver IP to that computer's LAN IP and start UDP audio.
 
+The receiver may be started before the host begins sending. It waits for valid audio, accepts stream start/resync packets, and re-buffers after a sender restart.
+
 If telemetry needs an explicit return host:
 
 ```bash

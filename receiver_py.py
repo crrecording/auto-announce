@@ -23,6 +23,8 @@ from collections import deque
 from dataclasses import dataclass
 
 from protocol_codec import (
+    FLAG_RESYNC,
+    FLAG_START,
     MSG_AUDIO,
     MSG_TELEMETRY,
     STATUS_STREAM_PRESENT,
@@ -51,6 +53,8 @@ class ReceiverStats:
     expected_seq: int | None = None
     first_timestamp: int | None = None
     last_timestamp: int | None = None
+    current_zone_id: int | None = None
+    current_stream_id: int | None = None
     lost: int = 0
     duplicate_or_late: int = 0
     parse_errors: int = 0
@@ -105,12 +109,21 @@ class RawAudioPlayer:
     def __init__(self, command: list[str], stats: ReceiverStats):
         self.command = command
         self.stats = stats
+        self.process = None
+
+    def start(self) -> bool:
+        if self.process and self.process.poll() is None:
+            return True
         self.process = subprocess.Popen(
-            command,
+            self.command,
             stdin=subprocess.PIPE,
         )
+        self.stats.playback_exit_code = None
+        return True
 
     def write(self, pcm: bytes) -> bool:
+        if not self.start():
+            return False
         exit_code = self.process.poll()
         if exit_code is not None:
             self.stats.playback_exit_code = exit_code
@@ -127,6 +140,8 @@ class RawAudioPlayer:
             return False
 
     def close(self) -> None:
+        if not self.process:
+            return
         if self.process.stdin:
             try:
                 self.process.stdin.close()
@@ -163,6 +178,13 @@ class BufferedAudioPlayer:
                 self.stats.playback_drops += 1
             self.buffer.append(bytes(pcm))
             self.stats.playback_buffer_frames = len(self.buffer)
+            self.condition.notify()
+
+    def reset(self) -> None:
+        with self.condition:
+            self.buffer.clear()
+            self.started = False
+            self.stats.playback_buffer_frames = 0
             self.condition.notify()
 
     def close(self) -> None:
@@ -274,6 +296,7 @@ def print_stats(stats: ReceiverStats) -> None:
         f"packets={stats.packets} pps={pps:.1f} "
         f"seq={stats.first_seq}..{stats.last_seq} "
         f"ts={stats.first_timestamp}..{stats.last_timestamp} "
+        f"stream={stats.current_zone_id or '-'}:{stats.current_stream_id or '-'} "
         f"lost={stats.lost} late={stats.duplicate_or_late} "
         f"playbuf={stats.playback_buffer_frames} "
         f"under={stats.playback_underflows} drop={stats.playback_drops} "
@@ -339,7 +362,16 @@ def run(args: argparse.Namespace) -> int:
                 if header.msg_type != MSG_AUDIO:
                     continue
 
-                if stats.expected_seq is None:
+                stream_changed = (
+                    stats.current_zone_id != header.zone_id
+                    or stats.current_stream_id != header.stream_id
+                )
+                stream_reset = bool(header.flags & (FLAG_START | FLAG_RESYNC))
+                if stats.expected_seq is None or stream_changed or stream_reset:
+                    if player and stats.expected_seq is not None:
+                        player.reset()
+                    stats.current_zone_id = header.zone_id
+                    stats.current_stream_id = header.stream_id
                     stats.expected_seq = header.seq
                     stats.first_seq = header.seq
                     stats.first_timestamp = header.timestamp
