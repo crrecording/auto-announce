@@ -139,7 +139,7 @@ class RawAudioPlayer:
 
 
 class BufferedAudioPlayer:
-    def __init__(self, command: list[str], buffer_ms: int, max_buffer_ms: int, stats: ReceiverStats):
+    def __init__(self, command: list[str], buffer_ms: int, max_buffer_ms: int, write_ms: int, stats: ReceiverStats):
         self.stats = stats
         self.player = RawAudioPlayer(command, stats)
         self.buffer = deque()
@@ -148,6 +148,8 @@ class BufferedAudioPlayer:
         self.started = False
         self.start_frames = max(1, round(buffer_ms / (FRAME_INTERVAL_S * 1000)))
         self.max_frames = max(self.start_frames, round(max_buffer_ms / (FRAME_INTERVAL_S * 1000)))
+        self.write_frames = max(1, round(write_ms / (FRAME_INTERVAL_S * 1000)))
+        self.write_interval_s = self.write_frames * FRAME_INTERVAL_S
         self.silence = b"\x00" * FRAME_BYTES
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -181,20 +183,23 @@ class BufferedAudioPlayer:
                 if not self.started:
                     self.started = True
                     next_write_at = time.perf_counter()
-                if self.buffer:
-                    frame = self.buffer.popleft()
-                else:
-                    frame = self.silence
-                    self.stats.playback_underflows += 1
+                frames = []
+                for _ in range(self.write_frames):
+                    if self.buffer:
+                        frames.append(self.buffer.popleft())
+                    else:
+                        frames.append(self.silence)
+                        self.stats.playback_underflows += 1
                 self.stats.playback_buffer_frames = len(self.buffer)
+                chunk = b"".join(frames)
 
-            if not self.player.write(frame):
+            if not self.player.write(chunk):
                 with self.condition:
                     self.closed = True
                     self.buffer.clear()
                     self.stats.playback_buffer_frames = 0
                 return
-            next_write_at += FRAME_INTERVAL_S
+            next_write_at += self.write_interval_s
             sleep_s = next_write_at - time.perf_counter()
             if sleep_s > 0:
                 time.sleep(sleep_s)
@@ -293,7 +298,13 @@ def run(args: argparse.Namespace) -> int:
             if wav:
                 wav.close()
             return 2
-        player = BufferedAudioPlayer(playback_command, args.play_buffer_ms, args.play_max_buffer_ms, stats)
+        player = BufferedAudioPlayer(
+            playback_command,
+            args.play_buffer_ms,
+            args.play_max_buffer_ms,
+            args.play_write_ms,
+            stats,
+        )
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((args.host, args.port))
@@ -305,7 +316,10 @@ def run(args: argparse.Namespace) -> int:
         print(f"Writing received PCM to WAV: {args.wav_out}")
     if player:
         print(f"Live playback command: {' '.join(playback_command)}")
-        print(f"Live playback buffer: start={args.play_buffer_ms}ms max={args.play_max_buffer_ms}ms")
+        print(
+            f"Live playback buffer: start={args.play_buffer_ms}ms "
+            f"max={args.play_max_buffer_ms}ms write={args.play_write_ms}ms"
+        )
 
     next_print = time.time() + 1
     try:
@@ -398,6 +412,7 @@ def main() -> int:
     parser.add_argument("--play", action="store_true", help="Play received PCM audio live through a local raw-audio player.")
     parser.add_argument("--play-buffer-ms", type=int, default=750, help="Initial live playback buffer in milliseconds.")
     parser.add_argument("--play-max-buffer-ms", type=int, default=2000, help="Maximum live playback buffer before old frames are dropped.")
+    parser.add_argument("--play-write-ms", type=int, default=100, help="Playback pipe write chunk size in milliseconds.")
     parser.add_argument(
         "--play-command",
         default=None,
