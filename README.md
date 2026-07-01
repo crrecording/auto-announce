@@ -101,7 +101,7 @@ Live playback uses `ffplay` from FFmpeg or `play` from SoX if either is installe
 python3 receiver_py.py --host 0.0.0.0 --telemetry-host HOST_APP_IP --play --wav-out received.wav
 ```
 
-Live playback starts with a small jitter buffer before writing to the local player. The receiver stats include:
+Live playback starts with a small jitter buffer before writing to the local player. After `--stream-timeout-ms` without audio, the receiver unlocks from the previous sequence and restarts the local player so a sender restart can relock cleanly. The receiver stats include:
 
 ```text
 playbuf = queued playback frames

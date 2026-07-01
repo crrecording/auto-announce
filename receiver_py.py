@@ -64,6 +64,8 @@ class ReceiverStats:
     playback_broken_pipes: int = 0
     playback_exit_code: int | None = None
     last_from: str | None = None
+    last_audio_at: float | None = None
+    stream_timed_out: bool = False
     started_at: float = time.time()
 
 
@@ -110,8 +112,13 @@ class RawAudioPlayer:
         self.command = command
         self.stats = stats
         self.process = None
+        self.lock = threading.Lock()
 
     def start(self) -> bool:
+        with self.lock:
+            return self._start_locked()
+
+    def _start_locked(self) -> bool:
         if self.process and self.process.poll() is None:
             return True
         self.process = subprocess.Popen(
@@ -122,35 +129,45 @@ class RawAudioPlayer:
         return True
 
     def write(self, pcm: bytes) -> bool:
-        if not self.start():
-            return False
-        exit_code = self.process.poll()
-        if exit_code is not None:
-            self.stats.playback_exit_code = exit_code
-            return False
-        if self.process.stdin is None:
-            return False
-        try:
-            self.process.stdin.write(pcm)
-            self.process.stdin.flush()
-            return True
-        except BrokenPipeError:
-            self.stats.playback_broken_pipes += 1
-            self.stats.playback_exit_code = self.process.poll()
-            return False
+        with self.lock:
+            if not self._start_locked():
+                return False
+            exit_code = self.process.poll()
+            if exit_code is not None:
+                self.stats.playback_exit_code = exit_code
+                self.process = None
+                return False
+            if self.process.stdin is None:
+                return False
+            try:
+                self.process.stdin.write(pcm)
+                self.process.stdin.flush()
+                return True
+            except BrokenPipeError:
+                self.stats.playback_broken_pipes += 1
+                self.stats.playback_exit_code = self.process.poll()
+                self.process = None
+                return False
 
     def close(self) -> None:
-        if not self.process:
-            return
-        if self.process.stdin:
+        with self.lock:
+            proc = self.process
+            self.process = None
+            if not proc:
+                return
+            if proc.stdin:
+                try:
+                    proc.stdin.close()
+                except BrokenPipeError:
+                    pass
             try:
-                self.process.stdin.close()
-            except BrokenPipeError:
-                pass
-        try:
-            self.process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            self.process.terminate()
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
 
 class BufferedAudioPlayer:
@@ -180,12 +197,14 @@ class BufferedAudioPlayer:
             self.stats.playback_buffer_frames = len(self.buffer)
             self.condition.notify()
 
-    def reset(self) -> None:
+    def reset(self, restart_player: bool = False) -> None:
         with self.condition:
             self.buffer.clear()
             self.started = False
             self.stats.playback_buffer_frames = 0
             self.condition.notify()
+        if restart_player:
+            self.player.close()
 
     def close(self) -> None:
         with self.condition:
@@ -217,10 +236,11 @@ class BufferedAudioPlayer:
 
             if not self.player.write(chunk):
                 with self.condition:
-                    self.closed = True
                     self.buffer.clear()
+                    self.started = False
                     self.stats.playback_buffer_frames = 0
-                return
+                time.sleep(0.1)
+                continue
             next_write_at += self.write_interval_s
             sleep_s = next_write_at - time.perf_counter()
             if sleep_s > 0:
@@ -350,6 +370,15 @@ def run(args: argparse.Namespace) -> int:
             try:
                 raw, remote = sock.recvfrom(2048)
             except socket.timeout:
+                if (
+                    stats.last_audio_at is not None
+                    and not stats.stream_timed_out
+                    and (time.time() - stats.last_audio_at) * 1000 >= args.stream_timeout_ms
+                ):
+                    if player:
+                        player.reset(restart_player=True)
+                    stats.expected_seq = None
+                    stats.stream_timed_out = True
                 if time.time() >= next_print:
                     print_stats(stats)
                     next_print = time.time() + 1
@@ -369,7 +398,7 @@ def run(args: argparse.Namespace) -> int:
                 stream_reset = bool(header.flags & (FLAG_START | FLAG_RESYNC))
                 if stats.expected_seq is None or stream_changed or stream_reset:
                     if player and stats.expected_seq is not None:
-                        player.reset()
+                        player.reset(restart_player=True)
                     stats.current_zone_id = header.zone_id
                     stats.current_stream_id = header.stream_id
                     stats.expected_seq = header.seq
@@ -389,6 +418,8 @@ def run(args: argparse.Namespace) -> int:
                 stats.last_seq = header.seq
                 stats.last_timestamp = header.timestamp
                 stats.last_from = f"{remote[0]}:{remote[1]}"
+                stats.last_audio_at = time.time()
+                stats.stream_timed_out = False
                 if wav:
                     wav.write(payload.audio)
                 if player:
@@ -445,6 +476,7 @@ def main() -> int:
     parser.add_argument("--play-buffer-ms", type=int, default=750, help="Initial live playback buffer in milliseconds.")
     parser.add_argument("--play-max-buffer-ms", type=int, default=2000, help="Maximum live playback buffer before old frames are dropped.")
     parser.add_argument("--play-write-ms", type=int, default=100, help="Playback pipe write chunk size in milliseconds.")
+    parser.add_argument("--stream-timeout-ms", type=int, default=800, help="No-audio timeout before unlocking and resetting local playback.")
     parser.add_argument(
         "--play-command",
         default=None,
