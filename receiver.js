@@ -32,6 +32,9 @@ const stats = {
   parseErrors: 0,
   lastFrom: null,
   startedAt: Date.now(),
+  lastPrintAt: Date.now(),
+  lastPrintPackets: 0,
+  intervalPps: 0,
 };
 
 const socket = dgram.createSocket("udp4");
@@ -77,6 +80,18 @@ socket.on("message", (raw, rinfo) => {
       packetLossPpm: estimateLossPpm(),
       lastSeq: header.seq,
       streamId: header.streamId,
+      debug: {
+        receiverPpsX10: Math.round(stats.intervalPps * 10),
+        totalPackets: stats.packets,
+        lostPackets: stats.lost,
+        latePackets: stats.duplicateOrLate,
+        playbackBufferFrames: 0,
+        playbackUnderflows: 0,
+        playbackDrops: 0,
+        playbackBrokenPipes: 0,
+        playbackExitCode: -1,
+        parseErrors: stats.parseErrors,
+      },
     };
     const response = packTelemetryPacket(
       {
@@ -108,10 +123,17 @@ socket.bind(listenPort, listenHost, () => {
 setInterval(printStats, 1000);
 
 function printStats() {
-  const elapsed = (Date.now() - stats.startedAt) / 1000;
+  const now = Date.now();
+  const elapsed = (now - stats.startedAt) / 1000;
   const pps = elapsed > 0 ? (stats.packets / elapsed).toFixed(1) : "0.0";
+  const intervalElapsed = Math.max((now - stats.lastPrintAt) / 1000, 0.001);
+  const intervalPackets = stats.packets - stats.lastPrintPackets;
+  const intervalPps = (intervalPackets / intervalElapsed).toFixed(1);
+  stats.intervalPps = Number(intervalPps);
+  stats.lastPrintAt = now;
+  stats.lastPrintPackets = stats.packets;
   console.log(
-    `packets=${stats.packets} pps=${pps} seq=${stats.firstSeq}..${stats.lastSeq} ` +
+    `packets=${stats.packets} avg=${pps} current=${intervalPps} seq=${stats.firstSeq}..${stats.lastSeq} ` +
     `ts=${stats.firstTimestamp}..${stats.lastTimestamp} lost=${stats.lost} ` +
     `late=${stats.duplicateOrLate} errors=${stats.parseErrors} from=${stats.lastFrom || "-"}`
   );

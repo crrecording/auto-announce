@@ -14,6 +14,7 @@ from protocol_codec import (
     MSG_TELEMETRY,
     FLAG_START,
     AudioPayload,
+    TelemetryDebug,
     TelemetryPayload,
     ENC_PCM16_LE,
     parse_packet,
@@ -53,6 +54,18 @@ def run():
         packet_loss_ppm=12,
         last_seq=12345,
         stream_id=11,
+        debug=TelemetryDebug(
+            receiver_pps_x10=998,
+            total_packets=4567,
+            lost_packets=3,
+            late_packets=2,
+            playback_buffer_frames=6,
+            playback_underflows=7,
+            playback_drops=8,
+            playback_broken_pipes=1,
+            playback_exit_code=-1,
+            parse_errors=4,
+        ),
     )
     tp = Packet(MSG_TELEMETRY, zone_id=3, stream_id=11, seq=54321, timestamp=96000, flags=0, payload=tlm.pack())
     traw = tp.pack(include_crc=False)
@@ -61,6 +74,9 @@ def run():
     tp2 = tdec["payload"]
     assert tp2.status == 0x05
     assert tp2.last_seq == 12345
+    assert tp2.debug is not None
+    assert tp2.debug.receiver_pps_x10 == 998
+    assert tp2.debug.playback_underflows == 7
 
     ctrl = ControlPayload(op=1, zone_id=3, arg_u32=0xDEADBEEF)
     cp = Packet(MSG_CONTROL, zone_id=3, stream_id=11, seq=999, payload=ctrl.pack(), timestamp=96000)
@@ -94,4 +110,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-

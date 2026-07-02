@@ -64,7 +64,8 @@ function packAudioPayload(payload) {
 }
 
 function packTelemetryPayload(payload) {
-  const out = Buffer.alloc(18);
+  const debugLen = payload.debug ? 34 : 0;
+  const out = Buffer.alloc(18 + debugLen);
   let offset = 0;
   out.writeUInt8(payload.status & 0xff, offset); offset += 1;
   out.writeUInt8((payload.rssi ?? 0) & 0xff, offset); offset += 1;
@@ -74,8 +75,29 @@ function packTelemetryPayload(payload) {
   out.writeUInt16LE((payload.packetLossPpm ?? 0) & 0xffff, offset); offset += 2;
   out.writeUInt32LE((payload.lastSeq ?? 0) >>> 0, offset); offset += 4;
   out.writeUInt16LE((payload.streamId ?? 0) & 0xffff, offset); offset += 2;
-  out.writeUInt16LE(0, offset);
+  out.writeUInt16LE(0, offset); offset += 2;
+
+  if (payload.debug) {
+    const debug = payload.debug;
+    out.writeUInt16LE(0x4441, offset); offset += 2;
+    out.writeUInt8(1, offset); offset += 1;
+    out.writeUInt8((debug.flags ?? 0) & 0xff, offset); offset += 1;
+    out.writeUInt16LE((debug.receiverPpsX10 ?? 0) & 0xffff, offset); offset += 2;
+    out.writeUInt32LE((debug.totalPackets ?? 0) >>> 0, offset); offset += 4;
+    out.writeUInt32LE((debug.lostPackets ?? 0) >>> 0, offset); offset += 4;
+    out.writeUInt32LE((debug.latePackets ?? 0) >>> 0, offset); offset += 4;
+    out.writeUInt16LE((debug.playbackBufferFrames ?? 0) & 0xffff, offset); offset += 2;
+    out.writeUInt32LE((debug.playbackUnderflows ?? 0) >>> 0, offset); offset += 4;
+    out.writeUInt32LE((debug.playbackDrops ?? 0) >>> 0, offset); offset += 4;
+    out.writeUInt16LE((debug.playbackBrokenPipes ?? 0) & 0xffff, offset); offset += 2;
+    out.writeInt16LE(clampInt16(debug.playbackExitCode ?? -1), offset); offset += 2;
+    out.writeUInt16LE((debug.parseErrors ?? 0) & 0xffff, offset);
+  }
   return out;
+}
+
+function clampInt16(value) {
+  return Math.max(-32768, Math.min(32767, Number(value) || 0));
 }
 
 function packControlPayload(payload) {
@@ -157,7 +179,7 @@ function parsePayload(msgType, payload) {
 
   if (msgType === MSG_TELEMETRY) {
     if (payload.length < 18) throw new Error("telemetry payload too short");
-    return {
+    const out = {
       status: payload.readUInt8(0),
       rssi: payload.readUInt8(1),
       ambientRms: payload.readUInt16LE(2),
@@ -167,6 +189,24 @@ function parsePayload(msgType, payload) {
       lastSeq: payload.readUInt32LE(10),
       streamId: payload.readUInt16LE(14),
     };
+    if (payload.length >= 52 && payload.readUInt16LE(18) === 0x4441) {
+      out.debug = {
+        version: payload.readUInt8(20),
+        flags: payload.readUInt8(21),
+        receiverPpsX10: payload.readUInt16LE(22),
+        receiverPps: payload.readUInt16LE(22) / 10,
+        totalPackets: payload.readUInt32LE(24),
+        lostPackets: payload.readUInt32LE(28),
+        latePackets: payload.readUInt32LE(32),
+        playbackBufferFrames: payload.readUInt16LE(36),
+        playbackUnderflows: payload.readUInt32LE(38),
+        playbackDrops: payload.readUInt32LE(42),
+        playbackBrokenPipes: payload.readUInt16LE(46),
+        playbackExitCode: payload.readInt16LE(48),
+        parseErrors: payload.readUInt16LE(50),
+      };
+    }
+    return out;
   }
 
   if (msgType === MSG_CONTROL) {

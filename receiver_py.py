@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import shlex
 import shutil
 import socket
@@ -29,6 +30,7 @@ from protocol_codec import (
     MSG_TELEMETRY,
     STATUS_STREAM_PRESENT,
     Packet,
+    TelemetryDebug,
     TelemetryPayload,
     parse_packet,
 )
@@ -63,10 +65,15 @@ class ReceiverStats:
     playback_buffer_frames: int = 0
     playback_broken_pipes: int = 0
     playback_exit_code: int | None = None
+    ambient_rms: int = 0
+    ambient_capture_errors: int = 0
     last_from: str | None = None
     last_audio_at: float | None = None
     stream_timed_out: bool = False
     started_at: float = time.time()
+    last_print_at: float = time.time()
+    last_print_packets: int = 0
+    interval_pps: float = 0.0
 
 
 class WavWriter:
@@ -105,6 +112,68 @@ class WavWriter:
             )
         )
         self.file.close()
+
+
+class AmbientAudioMeter:
+    def __init__(self, command: list[str], stats: ReceiverStats):
+        self.command = command
+        self.stats = stats
+        self.process = None
+        self.closed = False
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def close(self) -> None:
+        self.closed = True
+        proc = self.process
+        if proc:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+        self.thread.join(timeout=2)
+        proc = self.process
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
+    def _run(self) -> None:
+        frame_bytes = FRAME_BYTES
+        while not self.closed:
+            try:
+                self.process = subprocess.Popen(
+                    self.command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                )
+                buffer = b""
+                while not self.closed and self.process.poll() is None:
+                    if self.process.stdout is None:
+                        break
+                    chunk = self.process.stdout.read(frame_bytes)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    while len(buffer) >= frame_bytes:
+                        frame = buffer[:frame_bytes]
+                        buffer = buffer[frame_bytes:]
+                        self.stats.ambient_rms = estimate_rms(frame)
+            except Exception:
+                self.stats.ambient_capture_errors += 1
+            finally:
+                proc = self.process
+                self.process = None
+                if proc and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except ProcessLookupError:
+                        pass
+            if not self.closed:
+                self.stats.ambient_capture_errors += 1
+                time.sleep(1)
 
 
 class RawAudioPlayer:
@@ -170,8 +239,63 @@ class RawAudioPlayer:
                     proc.kill()
 
 
+def scale_pcm16le_mono(frame: bytes, gain: float) -> bytes:
+    if gain >= 0.999:
+        return frame
+    if gain <= 0:
+        return b"\x00" * len(frame)
+
+    out = bytearray(len(frame))
+    for offset in range(0, len(frame), 2):
+        sample = struct.unpack_from("<h", frame, offset)[0]
+        struct.pack_into("<h", out, offset, round(sample * gain))
+    return bytes(out)
+
+
+def ramp_pcm16le_mono(frame: bytes, start_gain: float, end_gain: float) -> bytes:
+    sample_count = len(frame) // 2
+    if sample_count <= 0:
+        return frame
+
+    out = bytearray(len(frame))
+    for index in range(sample_count):
+        if sample_count == 1:
+            gain = end_gain
+        else:
+            gain = start_gain + (end_gain - start_gain) * (index / (sample_count - 1))
+        sample = struct.unpack_from("<h", frame, index * 2)[0]
+        struct.pack_into("<h", out, index * 2, round(sample * gain))
+    return bytes(out)
+
+
+def decay_from_sample_pcm16le_mono(sample: int, start_gain: float, end_gain: float) -> bytes:
+    out = bytearray(FRAME_BYTES)
+    for index in range(FRAME_SAMPLES):
+        if FRAME_SAMPLES == 1:
+            gain = end_gain
+        else:
+            gain = start_gain + (end_gain - start_gain) * (index / (FRAME_SAMPLES - 1))
+        struct.pack_into("<h", out, index * 2, round(sample * gain))
+    return bytes(out)
+
+
+def last_pcm16le_sample(frame: bytes) -> int:
+    if len(frame) < 2:
+        return 0
+    return struct.unpack_from("<h", frame, len(frame) - 2)[0]
+
+
 class BufferedAudioPlayer:
-    def __init__(self, command: list[str], buffer_ms: int, max_buffer_ms: int, write_ms: int, stats: ReceiverStats):
+    def __init__(
+        self,
+        command: list[str],
+        buffer_ms: int,
+        max_buffer_ms: int,
+        write_ms: int,
+        fade_in_ms: int,
+        fade_out_ms: int,
+        stats: ReceiverStats,
+    ):
         self.stats = stats
         self.player = RawAudioPlayer(command, stats)
         self.buffer = deque()
@@ -182,6 +306,11 @@ class BufferedAudioPlayer:
         self.max_frames = max(self.start_frames, round(max_buffer_ms / (FRAME_INTERVAL_S * 1000)))
         self.write_frames = max(1, round(write_ms / (FRAME_INTERVAL_S * 1000)))
         self.write_interval_s = self.write_frames * FRAME_INTERVAL_S
+        self.fade_samples_total = max(0, round(fade_in_ms * SAMPLE_RATE_HZ / 1000))
+        self.fade_samples_done = 0
+        self.fade_out_samples_total = max(0, round(fade_out_ms * SAMPLE_RATE_HZ / 1000))
+        self.fade_out_samples_remaining = 0
+        self.last_played_sample = 0
         self.silence = b"\x00" * FRAME_BYTES
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -201,6 +330,9 @@ class BufferedAudioPlayer:
         with self.condition:
             self.buffer.clear()
             self.started = False
+            self.fade_samples_done = 0
+            self.fade_out_samples_remaining = 0
+            self.last_played_sample = 0
             self.stats.playback_buffer_frames = 0
             self.condition.notify()
         if restart_player:
@@ -227,10 +359,28 @@ class BufferedAudioPlayer:
                 frames = []
                 for _ in range(self.write_frames):
                     if self.buffer:
-                        frames.append(self.buffer.popleft())
+                        frame = self.buffer.popleft()
+                        if self.fade_samples_done < self.fade_samples_total:
+                            start_gain = self.fade_samples_done / max(1, self.fade_samples_total)
+                            self.fade_samples_done = min(self.fade_samples_total, self.fade_samples_done + FRAME_SAMPLES)
+                            end_gain = self.fade_samples_done / max(1, self.fade_samples_total)
+                            frame = ramp_pcm16le_mono(frame, start_gain, end_gain)
+                        self.fade_out_samples_remaining = 0
+                        self.last_played_sample = last_pcm16le_sample(frame)
+                        frames.append(frame)
                     else:
-                        frames.append(self.silence)
-                        self.stats.playback_underflows += 1
+                        if self.fade_out_samples_total > 0 and self.last_played_sample != 0:
+                            if self.fade_out_samples_remaining <= 0:
+                                self.fade_out_samples_remaining = self.fade_out_samples_total
+                            start_gain = self.fade_out_samples_remaining / max(1, self.fade_out_samples_total)
+                            self.fade_out_samples_remaining = max(0, self.fade_out_samples_remaining - FRAME_SAMPLES)
+                            end_gain = self.fade_out_samples_remaining / max(1, self.fade_out_samples_total)
+                            frames.append(decay_from_sample_pcm16le_mono(self.last_played_sample, start_gain, end_gain))
+                            if self.fade_out_samples_remaining <= 0:
+                                self.last_played_sample = 0
+                        else:
+                            frames.append(self.silence)
+                            self.stats.playback_underflows += 1
                 self.stats.playback_buffer_frames = len(self.buffer)
                 chunk = b"".join(frames)
 
@@ -238,6 +388,9 @@ class BufferedAudioPlayer:
                 with self.condition:
                     self.buffer.clear()
                     self.started = False
+                    self.fade_samples_done = 0
+                    self.fade_out_samples_remaining = 0
+                    self.last_played_sample = 0
                     self.stats.playback_buffer_frames = 0
                 time.sleep(0.1)
                 continue
@@ -250,7 +403,13 @@ class BufferedAudioPlayer:
 
 
 def default_playback_command() -> list[str] | None:
-    ffplay = shutil.which("ffplay")
+    ffplay = shutil.which("ffplay") or first_existing_path(
+        [
+            "/opt/homebrew/bin/ffplay",
+            "/usr/local/bin/ffplay",
+            "/usr/local/Cellar/ffmpeg/8.1.2/bin/ffplay",
+        ]
+    )
     if ffplay:
         return [
             ffplay,
@@ -290,6 +449,47 @@ def default_playback_command() -> list[str] | None:
     return None
 
 
+def default_ambient_command(device: str) -> list[str] | None:
+    ffmpeg = shutil.which("ffmpeg") or first_existing_path(
+        [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/usr/local/Cellar/ffmpeg/8.1.2/bin/ffmpeg",
+        ]
+    )
+    if not ffmpeg:
+        return None
+
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-f",
+        "avfoundation",
+        "-i",
+        f":{device}",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(SAMPLE_RATE_HZ),
+        "-f",
+        "s16le",
+        "-acodec",
+        "pcm_s16le",
+        "pipe:1",
+    ]
+
+
+def first_existing_path(paths: list[str]) -> str | None:
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def estimate_rms(audio: bytes) -> int:
     sample_count = len(audio) // 2
     if sample_count <= 0:
@@ -311,15 +511,23 @@ def estimate_loss_ppm(stats: ReceiverStats) -> int:
 def print_stats(stats: ReceiverStats) -> None:
     elapsed = max(time.time() - stats.started_at, 0.001)
     pps = stats.packets / elapsed
+    now = time.time()
+    interval_s = max(now - stats.last_print_at, 0.001)
+    interval_packets = stats.packets - stats.last_print_packets
+    interval_pps = interval_packets / interval_s
+    stats.interval_pps = interval_pps
+    stats.last_print_at = now
+    stats.last_print_packets = stats.packets
     playback_state = "dead" if stats.playback_exit_code is not None else "alive"
     print(
-        f"packets={stats.packets} pps={pps:.1f} "
+        f"packets={stats.packets} avg={pps:.1f} current={interval_pps:.1f} "
         f"seq={stats.first_seq}..{stats.last_seq} "
         f"ts={stats.first_timestamp}..{stats.last_timestamp} "
         f"stream={stats.current_zone_id or '-'}:{stats.current_stream_id or '-'} "
         f"lost={stats.lost} late={stats.duplicate_or_late} "
         f"playbuf={stats.playback_buffer_frames} "
         f"under={stats.playback_underflows} drop={stats.playback_drops} "
+        f"ambient={stats.ambient_rms} ambient_err={stats.ambient_capture_errors} "
         f"pipe={stats.playback_broken_pipes} play={playback_state}:{stats.playback_exit_code if stats.playback_exit_code is not None else '-'} "
         f"errors={stats.parse_errors} from={stats.last_from or '-'}",
         flush=True,
@@ -330,6 +538,19 @@ def run(args: argparse.Namespace) -> int:
     stats = ReceiverStats()
     wav = WavWriter(args.wav_out) if args.wav_out else None
     player = None
+    ambient_meter = None
+    if args.ambient_mic:
+        ambient_command = shlex.split(args.ambient_command) if args.ambient_command else default_ambient_command(args.ambient_device)
+        if ambient_command is None:
+            print(
+                "Ambient mic requested, but ffmpeg was not found. "
+                "Install ffmpeg or pass --ambient-command.",
+                flush=True,
+            )
+            if wav:
+                wav.close()
+            return 2
+        ambient_meter = AmbientAudioMeter(ambient_command, stats)
     if args.play:
         playback_command = shlex.split(args.play_command) if args.play_command else default_playback_command()
         if playback_command is None:
@@ -346,6 +567,8 @@ def run(args: argparse.Namespace) -> int:
             args.play_buffer_ms,
             args.play_max_buffer_ms,
             args.play_write_ms,
+            args.play_fade_in_ms,
+            args.play_fade_out_ms,
             stats,
         )
 
@@ -361,8 +584,11 @@ def run(args: argparse.Namespace) -> int:
         print(f"Live playback command: {' '.join(playback_command)}")
         print(
             f"Live playback buffer: start={args.play_buffer_ms}ms "
-            f"max={args.play_max_buffer_ms}ms write={args.play_write_ms}ms"
+            f"max={args.play_max_buffer_ms}ms write={args.play_write_ms}ms "
+            f"fade-in={args.play_fade_in_ms}ms fade-out={args.play_fade_out_ms}ms"
         )
+    if ambient_meter:
+        print(f"Ambient mic command: {' '.join(ambient_command)}")
 
     next_print = time.time() + 1
     try:
@@ -428,12 +654,24 @@ def run(args: argparse.Namespace) -> int:
                 telemetry = TelemetryPayload(
                     status=STATUS_STREAM_PRESENT,
                     rssi=0,
-                    ambient_rms=estimate_rms(payload.audio),
-                    buffer_ms=60,
+                    ambient_rms=stats.ambient_rms if ambient_meter else estimate_rms(payload.audio),
+                    buffer_ms=stats.playback_buffer_frames * round(FRAME_INTERVAL_S * 1000),
                     jitter_ms=0,
                     packet_loss_ppm=estimate_loss_ppm(stats),
                     last_seq=header.seq,
                     stream_id=header.stream_id,
+                    debug=TelemetryDebug(
+                        receiver_pps_x10=round(stats.interval_pps * 10),
+                        total_packets=stats.packets,
+                        lost_packets=stats.lost,
+                        late_packets=stats.duplicate_or_late,
+                        playback_buffer_frames=stats.playback_buffer_frames,
+                        playback_underflows=stats.playback_underflows,
+                        playback_drops=stats.playback_drops,
+                        playback_broken_pipes=stats.playback_broken_pipes,
+                        playback_exit_code=stats.playback_exit_code if stats.playback_exit_code is not None else -1,
+                        parse_errors=stats.parse_errors,
+                    ),
                 )
                 response = Packet(
                     MSG_TELEMETRY,
@@ -460,6 +698,8 @@ def run(args: argparse.Namespace) -> int:
         sock.close()
         if player:
             player.close()
+        if ambient_meter:
+            ambient_meter.close()
         if wav:
             wav.close()
             print(f"WAV saved: {args.wav_out}")
@@ -473,10 +713,19 @@ def main() -> int:
     parser.add_argument("--telemetry-port", type=int, default=DEFAULT_TELEMETRY_PORT, help="UDP telemetry destination port.")
     parser.add_argument("--wav-out", default=None, help="Optional path to write received PCM audio as a WAV file.")
     parser.add_argument("--play", action="store_true", help="Play received PCM audio live through a local raw-audio player.")
-    parser.add_argument("--play-buffer-ms", type=int, default=750, help="Initial live playback buffer in milliseconds.")
-    parser.add_argument("--play-max-buffer-ms", type=int, default=2000, help="Maximum live playback buffer before old frames are dropped.")
-    parser.add_argument("--play-write-ms", type=int, default=100, help="Playback pipe write chunk size in milliseconds.")
+    parser.add_argument("--play-buffer-ms", type=int, default=80, help="Initial live playback buffer in milliseconds.")
+    parser.add_argument("--play-max-buffer-ms", type=int, default=250, help="Maximum live playback buffer before old frames are dropped.")
+    parser.add_argument("--play-write-ms", type=int, default=20, help="Playback pipe write chunk size in milliseconds.")
+    parser.add_argument("--play-fade-in-ms", type=int, default=30, help="Soft fade-in applied when live playback starts or restarts.")
+    parser.add_argument("--play-fade-out-ms", type=int, default=30, help="Soft fade-out applied if the playback buffer runs empty.")
     parser.add_argument("--stream-timeout-ms", type=int, default=800, help="No-audio timeout before unlocking and resetting local playback.")
+    parser.add_argument("--ambient-mic", action="store_true", help="Capture a local receiver mic and report its RMS in telemetry.")
+    parser.add_argument("--ambient-device", default="0", help="FFmpeg avfoundation audio device index/name for --ambient-mic.")
+    parser.add_argument(
+        "--ambient-command",
+        default=None,
+        help="Optional raw-audio capture command for ambient mic. Must output 48 kHz mono PCM16_LE on stdout.",
+    )
     parser.add_argument(
         "--play-command",
         default=None,

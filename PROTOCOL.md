@@ -84,6 +84,24 @@ Payload:
 | 14 | 2 | stream_id | u16 | Last seen stream |
 | 16 | 2 | reserved | u16 | Must be zero |
 
+Prototype receivers may append an optional 34-byte debug telemetry extension after the v1 telemetry payload. Hosts should ignore it if absent.
+
+| Offset | Size | Field | Type | Notes |
+|---:|---:|---|---|---|
+| 18 | 2 | debug_magic | u16 | `0x4441` (`AD`) |
+| 20 | 1 | debug_version | u8 | `1` |
+| 21 | 1 | debug_flags | u8 | Reserved for prototype status flags |
+| 22 | 2 | receiver_pps_x10 | u16 | Current receiver packet rate * 10 |
+| 24 | 4 | total_packets | u32 | Accepted audio packets |
+| 28 | 4 | lost_packets | u32 | Detected missing sequence count |
+| 32 | 4 | late_packets | u32 | Duplicate or late packet count |
+| 36 | 2 | playback_buffer_frames | u16 | Receiver playback queue depth |
+| 38 | 4 | playback_underflows | u32 | Playback silence/recovery underflows |
+| 42 | 4 | playback_drops | u32 | Playback queue drops |
+| 46 | 2 | playback_broken_pipes | u16 | Local playback pipe failures |
+| 48 | 2 | playback_exit_code | i16 | Local player exit code, `-1` if alive/unused |
+| 50 | 2 | parse_errors | u16 | Receiver parse error count |
+
 ### 4.3 `0x03` Control
 
 Sent either direction.

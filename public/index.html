@@ -9,71 +9,255 @@
 <body>
   <main class="app">
     <header class="topbar">
-      <div>
+      <div class="brand">
+        <div class="brand-mark">AA</div>
         <h1>Auto-Announce</h1>
-        <p>Host stream controller</p>
       </div>
-      <div class="status-pill" id="runState">Stopped</div>
+      <div class="top-actions">
+        <button type="submit" form="streamForm" class="primary" id="startBtn">Start System</button>
+        <button type="button" class="icon-button top-gear" title="Network settings" aria-label="Network settings">⚙</button>
+      </div>
     </header>
 
-    <section class="panel controls">
-      <form id="streamForm">
-        <label>
-          Audio Source
-          <select id="sourceId" name="sourceId">
-            <option value="test-tone">Test tone generator</option>
-          </select>
-        </label>
-        <label>
-          Receiver IP
-          <input id="targetHost" name="targetHost" value="127.0.0.1" autocomplete="off">
-        </label>
-        <label>
-          Audio Port
-          <input id="targetPort" name="targetPort" type="number" min="1" max="65535" value="41771">
-        </label>
-        <label>
-          Zone
-          <input id="zoneId" name="zoneId" type="number" min="1" max="65535" value="1">
-        </label>
-        <label>
-          Stream
-          <input id="streamId" name="streamId" type="number" min="1" max="65535" value="1">
-        </label>
-        <label>
-          Tone Hz
-          <input id="frequencyHz" name="frequencyHz" type="number" min="20" max="20000" value="880">
-        </label>
-        <label>
-          Gain
-          <input id="gain" name="gain" type="number" min="0" max="1" step="0.01" value="0.20">
-        </label>
-        <div class="button-row">
-          <button type="submit" class="primary">Start UDP Audio</button>
-          <button type="button" id="stopBtn">Stop</button>
+    <form id="streamForm">
+      <section class="dashboard">
+        <aside class="panel source-panel">
+          <div class="section-head">
+            <h2>Input Source</h2>
+            <div class="indicator-row">
+              <span class="led-label"><span id="inputSignalLed" class="led"></span>Announcement</span>
+              <span id="clipState" class="state-badge utility-hidden">Clean</span>
+            </div>
+          </div>
+
+          <label>
+            Setup Type
+            <select id="setupType" name="setupType">
+              <option value="announcement-only">Announcement Only</option>
+              <option value="mixed-feed">Mixed Feed</option>
+              <option value="program-announcement">Program + Announcement</option>
+            </select>
+          </label>
+
+          <div class="input-route">
+            <div>
+              <span id="sourceLabel">Announcement Input</span>
+              <strong id="announcementSourceName">-</strong>
+            </div>
+            <details class="gear-menu">
+              <summary title="Announcement input settings" aria-label="Announcement input settings">⚙</summary>
+              <label>
+                Source
+                <select id="sourceId" name="sourceId">
+                  <option value="test-tone">Test tone generator</option>
+                </select>
+              </label>
+            </details>
+          </div>
+
+          <div class="input-route mode-panel" id="programSourceField">
+            <div>
+              <span>Program Input</span>
+              <strong id="programSourceName">-</strong>
+            </div>
+            <details class="gear-menu">
+              <summary title="Program input settings" aria-label="Program input settings">⚙</summary>
+              <label>
+                Source
+                <select id="programSourceId" name="programSourceId">
+                  <option value="">Choose program source</option>
+                </select>
+              </label>
+            </details>
+          </div>
+
+          <div class="utility-hidden">
+            <input id="audioFile" type="file" accept="audio/*,.wav,.aif,.aiff,.mp3,.m4a,.flac">
+            <button type="button" id="uploadAudioBtn">Load File</button>
+          </div>
+
+          <div class="source-meter-block">
+            <div id="inputMeter" class="meter-stack"></div>
+          </div>
+
+          <label>
+            Announcement Threshold dB
+            <input id="gateThresholdDb" name="gateThresholdDb" type="number" min="-90" max="0" step="1" value="-50">
+          </label>
+          <button type="button" id="setThresholdBtn">Set Input Signal Threshold</button>
+
+          <details class="source-list-drawer utility-hidden">
+            <summary>Available Sources</summary>
+            <div class="section-head tight">
+              <p id="deviceScanState" class="muted"></p>
+              <button type="button" id="refreshDevicesBtn">Refresh</button>
+            </div>
+            <div id="devices" class="devices"></div>
+          </details>
+        </aside>
+
+        <section class="panel zones-panel">
+          <div class="section-head zone-monitor-head">
+            <div>
+              <h2>Zone Monitor</h2>
+            </div>
+          </div>
+          <div id="zones" class="zone-grid"></div>
+        </section>
+
+        <aside class="panel zone-detail-panel">
+          <h2 id="zoneDetailTitle" class="zone-detail-title">Zone Details</h2>
+          <div id="zoneDetails" class="zone-detail-stack"></div>
+        </aside>
+      </section>
+
+      <section class="lower-panels">
+        <article class="panel compact-meter-panel utility-hidden">
+          <div class="meter-head">
+            <h2>Receiver Ambient</h2>
+            <span id="ambientState" class="state-badge">No telemetry</span>
+          </div>
+          <div id="ambientMeter" class="meter-stack"></div>
+        </article>
+        <article class="panel compact-meter-panel utility-hidden">
+          <div class="meter-head">
+            <h2>Processing</h2>
+            <div class="indicator-row">
+              <span class="led-label"><span id="holdLed" class="led"></span>Hold</span>
+              <span id="processingState" class="state-badge">Idle</span>
+            </div>
+          </div>
+          <div id="processingMeter" class="meter-stack"></div>
+        </article>
+        <details class="panel tuning-drawer">
+          <summary title="System tuning" aria-label="System tuning">⚙ System Tuning</summary>
+          <div class="tuning-panel">
+          <label class="slider-field">
+            <span class="field-head">
+              Input Trim dB
+              <span class="field-actions">
+                <output id="inputTrimDbValue" for="inputTrimDb">0.0</output>
+                <button type="button" class="mini-button" data-reset-slider="inputTrimDb">Default</button>
+              </span>
+            </span>
+            <input id="inputTrimDb" name="inputTrimDb" type="range" min="-10" max="10" step="0.5" value="0">
+          </label>
+          <label class="slider-field mode-panel" id="programLevelField">
+            <span class="field-head">
+              Program Level dB
+              <span class="field-actions">
+                <output id="programLevelDbValue" for="programLevelDb">0.0</output>
+                <button type="button" class="mini-button" data-reset-slider="programLevelDb">Default</button>
+              </span>
+            </span>
+            <input id="programLevelDb" name="programLevelDb" type="range" min="-60" max="12" step="0.5" value="0">
+          </label>
+          <label class="slider-field mode-panel" id="programDuckField">
+            <span class="field-head">
+              Program Duck dB
+              <span class="field-actions">
+                <output id="programDuckDbValue" for="programDuckDb">12.0</output>
+                <button type="button" class="mini-button" data-reset-slider="programDuckDb">Default</button>
+              </span>
+            </span>
+            <input id="programDuckDb" name="programDuckDb" type="range" min="0" max="60" step="0.5" value="12">
+          </label>
+          <label>
+            Baseline Ambient dB
+            <input id="baselineAmbientDb" name="baselineAmbientDb" type="number" min="-90" max="0" step="0.1" value="-60">
+          </label>
+          <label class="slider-field">
+            <span class="field-head">
+              Above Ambient dB
+              <span class="field-actions">
+                <output id="targetMarginDbValue" for="targetMarginDb">12.0</output>
+                <button type="button" class="mini-button" data-reset-slider="targetMarginDb">Default</button>
+              </span>
+            </span>
+            <input id="targetMarginDb" name="targetMarginDb" type="range" min="0" max="36" step="0.5" value="12">
+          </label>
+          <label class="slider-field">
+            <span class="field-head">
+              Max Add dB
+              <span class="field-actions">
+                <output id="maxAddedGainDbValue" for="maxAddedGainDb">36.0</output>
+                <button type="button" class="mini-button" data-reset-slider="maxAddedGainDb">Default</button>
+              </span>
+            </span>
+            <input id="maxAddedGainDb" name="maxAddedGainDb" type="range" min="0" max="60" step="0.5" value="36">
+          </label>
+          <label>
+            Limit dB
+            <input id="limiterCeilingDb" name="limiterCeilingDb" type="number" min="-24" max="0" step="0.5" value="-1">
+          </label>
+          <label>
+            Hold ms
+            <input id="holdMs" name="holdMs" type="number" min="0" max="10000" step="50" value="1000">
+          </label>
+          <button type="button" id="calibrateAmbientBtn">Set Ambient Baseline</button>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel media-panel">
+        <div class="section-head">
+          <h2>Announcement Media</h2>
+          <span class="muted">File playback and cue routing will live here.</span>
         </div>
-      </form>
-    </section>
+        <div class="media-row">
+          <label>
+            Audio File
+            <input id="mediaAudioFile" type="file" accept="audio/*,.wav,.aif,.aiff,.mp3,.m4a,.flac">
+          </label>
+          <button type="button" id="mediaUploadAudioBtn">Load File</button>
+        </div>
+      </section>
 
-    <section class="grid">
-      <article class="panel">
-        <h2>Stream</h2>
-        <dl id="streamStats"></dl>
-      </article>
-      <article class="panel">
-        <h2>Receiver Telemetry</h2>
-        <dl id="telemetryStats"></dl>
-      </article>
-    </section>
+      <details class="panel advanced-controls utility-hidden">
+        <summary>Advanced Stream</summary>
+        <div class="advanced-grid">
+          <label>
+            Receiver IP
+            <input id="targetHost" name="targetHost" value="192.168.10.101" autocomplete="off">
+          </label>
+          <label>
+            Audio Port
+            <input id="targetPort" name="targetPort" type="number" min="1" max="65535" value="41771">
+          </label>
+          <label>
+            Zone
+            <input id="zoneId" name="zoneId" type="number" min="1" max="65535" value="1">
+          </label>
+          <label>
+            Stream
+            <input id="streamId" name="streamId" type="number" min="1" max="65535" value="1">
+          </label>
+          <label>
+            Tone Hz
+            <input id="frequencyHz" name="frequencyHz" type="number" min="20" max="20000" value="880">
+          </label>
+          <label>
+            Test Gain
+            <input id="gain" name="gain" type="number" min="0" max="1" step="0.01" value="0.20">
+          </label>
+        </div>
+      </details>
+      <p id="uiMessage" class="muted app-message" role="status"></p>
+    </form>
 
-    <section class="panel">
-      <div class="section-head">
-        <h2>Audio Sources</h2>
-        <button type="button" id="refreshDevicesBtn">Refresh</button>
-      </div>
-      <p id="deviceScanState" class="muted"></p>
-      <div id="devices" class="devices"></div>
-    </section>
+    <details class="panel info-drawer">
+      <summary title="System information">ⓘ System Information</summary>
+      <section class="grid drawer-grid">
+        <article>
+          <h2>Stream</h2>
+          <dl id="streamStats"></dl>
+        </article>
+        <article>
+          <h2>Receiver Telemetry</h2>
+          <dl id="telemetryStats"></dl>
+        </article>
+      </section>
+    </details>
   </main>
   <script src="/app.js"></script>
 </body>

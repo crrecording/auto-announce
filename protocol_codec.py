@@ -95,6 +95,75 @@ class AudioPayload:
 
 
 @dataclass
+class TelemetryDebug:
+    flags: int = 0
+    receiver_pps_x10: int = 0
+    total_packets: int = 0
+    lost_packets: int = 0
+    late_packets: int = 0
+    playback_buffer_frames: int = 0
+    playback_underflows: int = 0
+    playback_drops: int = 0
+    playback_broken_pipes: int = 0
+    playback_exit_code: int = -1
+    parse_errors: int = 0
+
+    def pack(self) -> bytes:
+        return struct.pack(
+            "<HBBHIIIHIIHhH",
+            0x4441,
+            1,
+            self.flags & 0xFF,
+            self.receiver_pps_x10 & 0xFFFF,
+            self.total_packets & 0xFFFFFFFF,
+            self.lost_packets & 0xFFFFFFFF,
+            self.late_packets & 0xFFFFFFFF,
+            self.playback_buffer_frames & 0xFFFF,
+            self.playback_underflows & 0xFFFFFFFF,
+            self.playback_drops & 0xFFFFFFFF,
+            self.playback_broken_pipes & 0xFFFF,
+            max(-32768, min(32767, self.playback_exit_code)),
+            self.parse_errors & 0xFFFF,
+        )
+
+    @classmethod
+    def parse(cls, data: bytes) -> "TelemetryDebug | None":
+        if len(data) < 34:
+            return None
+        magic, version = struct.unpack("<HB", data[:3])
+        if magic != 0x4441 or version != 1:
+            return None
+        (
+            _magic,
+            _version,
+            flags,
+            receiver_pps_x10,
+            total_packets,
+            lost_packets,
+            late_packets,
+            playback_buffer_frames,
+            playback_underflows,
+            playback_drops,
+            playback_broken_pipes,
+            playback_exit_code,
+            parse_errors,
+        ) = struct.unpack("<HBBHIIIHIIHhH", data[:34])
+        return cls(
+            flags,
+            receiver_pps_x10,
+            total_packets,
+            lost_packets,
+            late_packets,
+            playback_buffer_frames,
+            playback_underflows,
+            playback_drops,
+            playback_broken_pipes,
+            playback_exit_code,
+            parse_errors,
+        )
+
+
+@dataclass
 class TelemetryPayload:
     status: int
     rssi: int
@@ -104,9 +173,10 @@ class TelemetryPayload:
     packet_loss_ppm: int
     last_seq: int
     stream_id: int
+    debug: TelemetryDebug | None = None
 
     def pack(self) -> bytes:
-        return struct.pack(
+        base = struct.pack(
             "<BBHHHHIHH",
             self.status & 0xFF,
             self.rssi & 0xFF,
@@ -118,13 +188,15 @@ class TelemetryPayload:
             self.stream_id & 0xFFFF,
             0,
         )
+        return base + (self.debug.pack() if self.debug else b"")
 
     @classmethod
     def parse(cls, data: bytes) -> "TelemetryPayload":
         if len(data) < 18:
             raise ValueError("telemetry payload too short")
         status, rssi, ambient_rms, buffer_ms, jitter_ms, packet_loss_ppm, last_seq, stream_id, _reserved = struct.unpack("<BBHHHHIHH", data[:18])
-        return cls(status, rssi, ambient_rms, buffer_ms, jitter_ms, packet_loss_ppm, last_seq, stream_id)
+        debug = TelemetryDebug.parse(data[18:]) if len(data) >= 52 else None
+        return cls(status, rssi, ambient_rms, buffer_ms, jitter_ms, packet_loss_ppm, last_seq, stream_id, debug)
 
 
 @dataclass
